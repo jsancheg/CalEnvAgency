@@ -1,0 +1,436 @@
+---
+title: "Technical Assessment for Automated Ship Detection (California Coast)"
+author: "Jorge Sánchez"
+format: pdf
+editor: visual
+execute:
+  kernel: ships_env
+---
+
+## Introduction
+This report will cover first an exploratory data analysis, a brief discussion of a proposal automation ship detection pipeline, the limitations of the dataset and the proposed pipeline, and finally a recommendation to the Agency.  
+
+
+```{python}
+#| echo: false
+#| cache: true
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
+from pathlib import Path
+from collections import Counter
+import re
+
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
+
+def parse_filename(filename):
+  """
+  Parse filename to extract metadata.
+  Format: {label}__{scene_id}__{longitude}_{latitude}.png
+  """
+  try:
+    parts = filename.replace('.png','').split('__')
+    label = int(parts[0])
+    scene_id = parts[1]
+    coords = parts[2].split('_')
+    longitude = float(coords[0])
+    latitude = float(coords[1])
+    
+    return {
+    'filename': filename,
+    'label': label,
+    'label_name': 'ship' if label == 1 else 'no-ship',
+    'scene_id': scene_id,
+    'longitude': longitude,
+    'latitude': latitude
+    }
+  except Exception as e:
+    print("Error parsing {filename}: {e}")
+    return None
+
+def load_dataset_metadata(dataset_path):
+  """
+  Load and parse all image metadata from the dataset.
+  """
+  print("="*88)
+  print("SHIP DETECTION DATASET - EXPLORATORY DATA ANALYSIS")
+  print("="*88)
+  
+  image_files = [ f for f in os.listdir(dataset_path) if f.endswith('.png')]
+  metadata_list = []
+  total_files = len(image_files)
+
+  for filename  in image_files:
+    meta = parse_filename(filename)
+    if meta:
+      metadata_list.append(meta)
+
+  df = pd.DataFrame(metadata_list)
+  print(f"\n Successfully loaded {len(df)} inages from a total of {total_files}")
+  return df
+
+def analyze_class_distribution(df):
+  """
+  Analyze the distribution of ship vs no-ship classes
+  """
+  
+  print("\n"+ "="*80)
+  print("1. CLASS DISTRIBUTION ANALYSIS")
+  print("="*80)
+  
+  class_counts = df['label_name'].value_counts()
+  print(f"\nClass Distribution:")
+  
+  for label, count in class_counts.items():
+    percentage = (count / len(df)) * 100
+    print(f"  {label:10s}:  {count:3d}  images  ({percentage:5.2f}%)" )
+    
+  # Calculate class inbalance ratio
+  ship_count = class_counts.get('ship',0)
+  no_ship_count = class_counts.get('no-ship',0)
+  imbalance_ratio = max(ship_count, no_ship_count)/(min(ship_count, no_ship_count))
+  print(f"\nClass Imbalance Ratio: {imbalance_ratio:2f}:1")
+  
+  if imbalance_ratio > 1.5:
+    print("Warning: Significant class imbalance detected")
+    print("Recommendation: Considerar class weighting or data augmentation")
+    
+  # Visualization
+  fig, axes = plt.subplots(1, 2, figsize = (14,5))
+  
+  # Bar chart
+  class_counts.plot(kind='bar', ax=axes[0], color=['#2ecc71', '#e74c3c'])
+  axes[0].set_title('Class_Distribution', fontsize = 14, fontweight = 'bold')
+  axes[0].set_xlabel('Class', fontsize = 12)
+  axes[0].set_ylabel('Number of Images', fontsize = 12)
+  axes[0].set_xticklabels(axes[0].get_xticklabels(), rotation = 0)
+  axes[0].grid(axis='y', alpha = 0.3)
+  
+  # Pie chart
+  colors = ['#2ecc71', '#e74c3c']
+  axes[1].pie(class_counts.values, labels=class_counts.index, autoplot="%1.1f%%",
+  colors = colors, startangle=90)
+  axes[1].set_title('Class Proportion', fontsize = 14, fontweight = 'bold')
+  
+  plt.tight_layout()
+  plt.savefig('class_distribution.png', dpi = 300, bbox_inches = 'tight')
+  print("\n Saved visualization: class_distribution.png")
+  plt.close()
+  
+  return class_counts
+
+def analyze_spatial_distribution(df):
+  """
+  Analyze the geographic distribution of images
+  """
+  
+  print("\n"+"="*80)
+  print("2. SPATIAL DISTRIBUTION ANALYSIS")
+  print("="*80)
+  
+  print(f"\nGeographic Coverage:")
+  print(f"  Longitude range: {df['longitude'].min():.4f} to {df['longitude'].max():.4f}")
+  print(f"  Latitude range: {df['latitude'].min():.4f} to {df['latitude'].max():.4f}")
+  
+  # Calculate center point
+  center_lon = df['longitude'].mean()
+  center_lat = df['latitude'].mean()
+  print(f"  Center point: ({center_lon:.4f}, {center_lat:.4f})")
+  
+  # Visualization
+  fig, axes = plt.subplots(1,2, figsize = (16,6))
+  
+  # Scatter plot with ship/no-ship distinction
+  for idx, (label,color) in enumerate([('ship', '#e74c3c'), ('no-ship', '#2ecc71')]):
+    subset = df[df['label_name'] == label]
+    axes[0].scatter(subset['longitude'], subset['latitude'],
+    c=color, label = label, alpha = 0.6, s = 50, edgecolors = 'black', linewidth = 0.5)
+    
+  axes[0].set_title('Geographic Distribution of Images', fontsize = 14, fontweight = 'bold')
+  axes[0].set_xlabel('Longitude', fontsize = 12)
+  axes[0].set_ylabel('Latitude', fontsize = 12)
+  axes[0].legend(loc = 'best')
+  axes[0].grid(True, alpha = 0.3)
+  
+  # Density heatmap
+  axes[1].hexbin(df['longitude'], df['latitude'], gridsize = 30, cmap = 'YlOrRd', mincnt = 1)
+  axes[1].set_title('Spatial Density Heatmap', fontsize = 14, fontweight = 'bold')
+  axes[1].set_xlabel('Longitude', fontsize = 12)
+  axes[1].set_ylabel('Latitude', fontsize = 12)
+  plt.colorbar(axes[1].collections[0], ax = axes[1], label='Number of Images')
+  
+  plt.tight_layout()
+  plt.savefig('spatial_distribution.png', dpi = 300, bbox_inches = 'tight')
+  print("\n Saved visualization: spatial_distribution.png")
+  
+  plt.close()
+
+def analyze_scene_distribution(df):
+    """Analyze distribution across differente satellite scenes."""
+    print("\n" + "="*80)
+    print("3. SCENE DISTRIBUTION ANALYSIS")
+    print("="*80)
+
+    scene_counts = df['scene_id'].value_counts()
+    print(f"\nTotal unique scenes: {len(scene_counts)}")
+    print(f"Images per scene - Mean: {scene_counts.mean():.1f}, Median: {scene_counts.median():.1f}")
+    print(f"Images per scene - Min: {scene_counts.min()}, Max: {scene_counts.max()}")
+
+    print(f"\nTop 10 scenes by image count:")
+    for i, (scene_id, count) in enumerate(scene_counts.head(10).items(), 1):
+        print(f" {i:2d}, {scene_id}:  {count} images")
+
+    # Analize class distribution per scene
+    
+    scene_class_dist = df.groupby(['scene_id', 'label_name']).size().unstack(fill_value = 0)
+    print(f"\nScenes with only ships: {(scene_class_dist['ship'] > 0) & (scene_class_dist['no-ship'] == 0).sum()}")
+    print(f"Scenes with only no-ships: {(scene_class_dist['no-ship'] > 0) & (scene_class_dist['ship'] == 0).sum()}")
+    print(f"Scenes with both classes: {((scene_class_dist['ship'] > 0) & (scene_class_dist['no-ship'] > 0)).sum()}")
+
+
+    # Visualization
+    fig, axes = plt.subplots(1, 2, figsize = (16 , 6))
+
+    # Distribution of images per scene
+    axes[0].hist(scene_counts.values, bins = 30, color = '#3498db', edgecolor = 'black', alpha = 0.7)
+    axes[0].set_title('Distribution of Images per Scene', fontsize = 14, fontweight = 'bold')
+    axes[0].set_xlabel('Number of Images', fontsize = 12)
+    axes[0].set_ylabel('Number of Scenes', fontsize = 12)
+    axes[0].axvline(scene_counts.mean(), color = 'red', linestyle = '--', linewidth = 2, label = f'Mean: {scene_counts.mean():.1f}')
+    axes[0].axvline(scene_counts.median(), color = 'green', linestyle = '--', linewidth = 1, label = f'Median: {scene_counts.median():.1f}')
+    axes[0].legend()
+    axes[0].grid(axis = 'y', alpha = 0.3)
+
+    # Top scenes bar plot
+    top_scenes = scene_counts.head(15)
+    axes[1].barh(range(len(top_scenes)), top_scenes.values, color = '#9b59b6')
+    axes[1].set_yticks(range(len(top_scenes)))
+    axes[1].set_yticklabels([scene_id[:20] + '...' if len(scene_id) > 20 else scene_id for scene_id in top_scenes.index], fontsize = 9)
+    axes[1].set_xlabel('Number of Images', fontsize = 12)
+    axes[1].set_title('Top 15 scenes by Image Count', fontsize = 14, fontweight = 'bold')
+    axes[1].invert_yaxis()
+    axes[1].grid(axis = 'x', alpha = 0.3)
+
+    plt.tight_layout()
+    plt.savefig('scene_distribution.png', dpi = 300, bbox_inches = 'tight')
+    print("\n Saved visualization: scene_distribution.png")
+    plt.close()
+    
+  
+def analyze_image_properties(dataset_path, df, sample_size = 50):
+  """
+  Analyze image properties like dimension, color distribution, etc.
+  """
+  
+  print("\n"+"="*80)
+  print("4. IMAGE PROPERTIES ANALYSIS")
+  print("="*80)
+  
+  # Sample images for detailed analysis
+  sample_df = df.sample(min(sample_size, len(df)),random_state = 42)
+  
+  image_stats = []
+  for _, row in sample_df.iterrows():
+    img_path = os.path.join(dataset_path, row['filename'])
+    try:
+      img = Image.open(img_path)
+      img_array = np.array(img)
+      
+      stats = {
+        'filename': row['filename'],
+        'label': row['label_name'],
+        'width': img.width,
+        'height': img.height,
+        'channels': img_array.shape[2] if len(img_array.shape) == 3 else 1,
+        'mean_intensity': img_array.mean(),
+        'std_intensity': img_array.std(),
+        'min_intensity': img_array.min(),
+        'max_intensity': img_array.max()
+      }
+      
+      image_stats.append(stats)
+    except Exception as e:
+      print(f"Error processing {row['filename']}: {e}")
+  stats_df = pd.DataFrame(image_stats)
+  
+  print(f"\nImage properties (based on {len(stats_df)} sample images):")
+  print(f"  Image dimensions: {stats_df['width'].iloc[0]}x{stats_df['height'].iloc[0]} pixels")
+  print(f"  Color chanels: {stats_df['channels'].iloc[0]} (RGB)")
+  print(f"  Pixel coverage: {stats_df['width'].iloc[0] * 3}m x {stats_df['height'].iloc[0] * 3}m = {(stats_df['width'].iloc[0] * 3 * stats_df['height'].iloc[0] * 3) / 1000000:.2f} km²")
+  
+  print(f"\nIntensive Statistics:")
+  print(f"  Mean intensity - Ship: {stats_df[stats_df['label'] == 'ship']['mean_intensity'].mean():.2f}")
+  print(f"  Mean intensity - No-ship: {stats_df[stats_df['label'] == 'no-ship']['mean_intensity'].mean():.2f}")
+  print(f"  Std intensity - Ship: {stats_df[stats_df['label'] == 'ship']['std_intensity'].mean():.2f}")
+  print(f"  Std intensity - No-ship: {stats_df[stats_df['label'] == 'no-ship']['std_intensity'].mean():.2f}")
+  
+  # Visualization
+  fig, axes = plt.subplots(2,2, figsize = (14, 10))
+  
+  # Mean intensity distribution
+  stats_df[stats_df['label'] == 'ship']['mean_intensity'].hist(ax=axes[0,0], bins = 20,
+  color = '#e74c3c', alpha = 0.7, label = 'Ship')
+  stats_df[stats_df['label'] == 'no-ship']['mean_intensity'].hist(ax=axes[0,0], bins = 20, color = '#e74c3c', alpha = 0.7, label = 'No-ship')
+  axes[0,0].set_title('Mean Pixel Intensity Distribution', fontsize = 12, fontweight = 'bold')
+  axes[0,0].set_xlabel('Mean Intensity', fontsize = 10)
+  axes[0,0].set_ylabel('Frequency', fontsize = 10)
+  axes[0,0].legend()
+  axes[0,0].grid(axis = 'y', alpha = 0.3)
+  
+  # Std intensity distribution
+  stats_df[stats_df['label'] == 'ship']['std_intensity'].hist(ax = axes[0,1], bins = 20, color = '#e74c3c', alpha = 0.7, label = 'Ship')
+  stats_df[stats_df['label'] == 'no-ship']['std_intensity'].hist(ax = axes[0,1], bins = 20, color = '#2ecc71', alpha = 0.7, label = 'No-ship')
+  axes[0,1].set_title('Std Pixel Itensity Distribution', fontsize = 12, fontweight = 'bold')
+  axes[0,1].set_xlabel('Std Intensity', fontsize = 10)
+  axes[0,1].set_ylabel('Frequency', fontsize = 10)
+  axes[0,1].legend()
+  axes[0,1].grid(axis = 'y', alpha = 0.3)
+  
+  # Sample images - Ships
+  ship_samples = df[df['label_name'] == 'ship'].sample(min(4, len(df[df['label_name'] == 'ship'])), random_state = 42)
+  for idx, (_, row) in enumerate(ship_samples.iterrows()):
+    if idx >= 2:
+      break
+    img_path = os.path.join(dataset_path, row['filename'])
+    try:
+      img = Image.open(img_path)
+      axes[1, idx].imshow(img)
+      axes[1, idx].set_title(f'Ship Example {idx+1}', fontsize = 10, fontweight = 'bold')
+      axes[1, idx].axis('off')
+    except:
+      pass
+    
+  plt.tight_layout()
+  plt.savefig('image_properties.png', dpi = 300, bbox_inches = 'tight')
+  print("\n Saved visualizations: image_properties.png")
+  plt.close()
+  
+  return stats_df
+
+def generate_summary_report(df, class_counts):
+  """Generate a comprehensive summary report."""
+  print("\n" + "="*80)
+  print("5. DATASET SUMMARY REPORT")
+  print("="*80)
+  
+  summary = f"""
+  Data Characteristics:
+    ------------------
+    Total Images: {len(df)}
+    Imate Resulution: 80x80 pixels (240m x 240m ground coverage)
+    Pixel Resolution: 3 meters per nivel 
+    Color Channels: 3 (RGB)
+    
+    Class Distribution:
+      ----------------
+      Ship Images: {class_counts.get('ship',0)} ({(class_counts.get('ship', 0)/len(df)*100):.1f}%)
+      No-Ship Images: {class_counts.get('no-ship', 0)} ({(class_counts.get('no-ship', 0)/ len(df)*100):,.1f}%)
+    
+    Geopraphic Coverage:
+      -----------------
+      Longitude Range: {df['longitude'].min():.4f}" to {df['longitude'].max():.4f}"
+      Latitude Range: {df['latitude'].min():.4f}" to {df['latitude'].max():.4f}"
+      Center Point: ({df['Longitude'].mean():4f}",{df['latitude'].mean():.4f}")
+      
+    Scene Information:
+      ----------------
+      Unique Scenes: {df['scene_id'].unique()}
+      Average Images per Scene: {df.groupby('scene_id').size().mean():.1f)}
+      
+      Key Findings:
+        -----------
+        1. The dataset is relatively balanced between ship and no-ship classes
+        2. Images are concentrated around the California coastline.
+        3. Multiple scenes provide temporal diversity
+        4. Consistent 80x80 pixel format suitable for CNN-based approaches
+        5. 3-meter resolution is appropriate for detecting large vessels
+        
+        Recomendations:
+          ------------
+          1. Dataset is suitable for supervised learning approaches
+          2. Consider data augmentation to improve model robustness
+          3. Implement train/validation/test split stratified by scene_id
+          4. Use transfer learning with pre-trained models (e.g ResNet, EfficientNet)
+          5. Consider essemble methods for production deployment
+"""
+
+  print(summary)
+  
+  # Save report to file
+  with open('dataset_summary_report.txt', 'w') as f:
+    f.write("SHIP DETECTION DATASET - EXPLORATORY DATA ANALYSIS\n")
+    f.write("California Environmental Agency\n")
+    f.write("="*80 + "\n")
+    f.write(summary)
+    
+  print("\n Saved report: dataset_summary_report.txt")
+
+
+  
+      
+  
+  
+  
+  
+
+    
+```
+## Exploratory Data Analysis (EDA) Summary
+The initial dataset, consisting of 4000 satellite images crops (80x80 pixes), reveals significant limitations for robust model training.
+In Figure 1, we can see that the classes are inbalanced with 3000 images labelled as 'no-ship' and 1000 images labelled as 'ship'. 
+
+![Class Distribution](class_distribution.png)
+
+<!--#![](scene_distribution.png)
+
+#![](image_properties.png)
+
+#![](spatial_distribution.png) -->
+
+Furthermore, the geographical distribution is heavily concentrated in only two coastal areas (as confirmed by the geo-localization data in Figure 2), and there are inconsistencies, including some coordinates corresponding to mainland locations (see Figure 3). 
+![](spatial_distribution_map_2.png)
+This localizaed and unbalanced data severly limits the model's ability to generalize across the entire California coastline.
+
+![](spatial_distribution_map.png)
+
+```{python}
+#| echo: false
+#| cache: true
+#| results: false
+
+DATASET_PATH = "/home/jsancheg/Downloads/OneDrive_1_01-11-2025/Part-A.1-CalEnvAgency/shipdata_2025/cropped_ship_dataset"
+
+df = load_dataset_metadata(DATASET_PATH)
+```
+
+
+# Proposed Automation Pipeline: YOLO-Based Detection
+To move towards automated counting, I proposed a state-of-the-art **You Only Look Once (YOLO)** object detection framework. This approach is superior to traditional methods like the Sliding Window technique for satellite imagery due to its speed and high recall.
+
+**Pipeline Outline**
+- Data Preprocessing: Upscale the 1,000 'ship' cropped images from 80x80 pixels to standard 640x640 resolution. This is essential for modern Convolitional Neural Networks (CNNs).
+- Proxy Label Generation: Generate precise YOLO-format bounding boxes for the upscaled 'ship' images. This creates a high-quality positive training subset.
+- Model Selection & Training: Select a resource-efficient model like YOLOv5 for training. The model will be fine-tuned to classify and localize ships within the 640x640 positive subsets.
+- Inference: The trained YOLO model will then be applied directly to satellite scene images (not cropped 80x80 images) to provide real-time counts and geo-localization for all vessels within the scene.
+
+## Deployment Limitations & Critical Recommendations
+**Data Limitations**
+The current dataset creates the major risks for deployment:
+
+- Low Precision: The small sample size (1,000 positive images) increases the risk of overfitting resulting in poor performance on new, unseen data.
+- Generalization Failure: The lack of diverse environmental samples (varying weather, lightning sea state, and vessels sizes) will cause the model to perform poorly outside the specific conditions seen in the training data.
+- Geo-Bias: The limited focus on two geographic zones prevents accurate monitoring of the broader coastline.
+
+**Recommendation for Real-Time Monitoring*
+To achieve scalable and reliable monitoring, I recommend a shift in data strategy:
+- Mandate Satellite Image Acquisition: Inmediately procure a large, diverse dataset of full, high-resoultion satellite scene images covering  the entire California coasline. The model must be trained and tested on a target imagery (fully scenes), not just cropped tiles, as the Sliding Window method is inefficient for scaling.
+- Data Augmenttion & Rebalancing: Implement advanced techniques (e.g MixUp, Mosaic) to artificially inflate and diversify the 'ship' class data
+- Continuous Learning Loop: Deploy the model into a moniotring environment where human-validated detections can be continuously fed back into the training dataset.
+
+
+
